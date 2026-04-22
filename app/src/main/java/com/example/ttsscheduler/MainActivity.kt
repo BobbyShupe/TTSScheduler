@@ -6,7 +6,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,8 +14,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -33,12 +31,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         enableEdgeToEdge()
 
         ReminderRepository.init(this)
 
-        // Exact alarm permission request
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val alarmManager = getSystemService(AlarmManager::class.java) as AlarmManager
             if (!alarmManager.canScheduleExactAlarms()) {
@@ -62,7 +58,6 @@ class MainActivity : ComponentActivity() {
                     primary = Color(0xFFBB86FC)
                 )
             ) {
-                // Make navigation bar black
                 val view = LocalView.current
                 SideEffect {
                     val window = (view.context as? android.app.Activity)?.window ?: return@SideEffect
@@ -83,27 +78,43 @@ class MainActivity : ComponentActivity() {
 fun MainScreen() {
     val context = LocalContext.current
     var reminders by remember { mutableStateOf(ReminderRepository.getAll()) }
-    var isEnabled by remember { mutableStateOf(getEnabledState(context)) }
+    var isMasterEnabled by remember { mutableStateOf(getMasterEnabledState(context)) }
     var showDialog by remember { mutableStateOf(false) }
+    var editingReminder by remember { mutableStateOf<Reminder?>(null) }
 
     val refresh = { reminders = ReminderRepository.getAll() }
 
-    // Enable/Disable all reminders
-    val toggleEnabled = { enabled: Boolean ->
-        isEnabled = enabled
-        saveEnabledState(context, enabled)
-
+    val toggleMaster = { enabled: Boolean ->
+        isMasterEnabled = enabled
+        saveMasterEnabledState(context, enabled)
         if (enabled) {
-            // Re-schedule all reminders
-            reminders.forEach { reminder ->
-                AlarmScheduler.schedule(context, reminder)
-            }
+            reminders.forEach { if (it.isEnabled) AlarmScheduler.schedule(context, it) }
         } else {
-            // Cancel all alarms
-            reminders.forEach { reminder ->
+            reminders.forEach { AlarmScheduler.cancel(context, it.id) }
+        }
+    }
+
+    val toggleReminder = { reminder: Reminder, enabled: Boolean ->
+        val updated = reminder.copy(isEnabled = enabled)
+        val currentList = ReminderRepository.getAll().toMutableList()
+        val index = currentList.indexOfFirst { it.id == reminder.id }
+        if (index != -1) {
+            currentList[index] = updated
+            ReminderRepository.saveAll(currentList)
+            refresh()
+
+            if (enabled && isMasterEnabled) {
+                AlarmScheduler.schedule(context, updated)
+            } else {
                 AlarmScheduler.cancel(context, reminder.id)
             }
         }
+    }
+
+    val deleteReminder = { id: Int ->
+        ReminderRepository.delete(id)
+        AlarmScheduler.cancel(context, id)
+        refresh()
     }
 
     Scaffold(
@@ -111,21 +122,18 @@ fun MainScreen() {
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text("TTS Daily Scheduler") },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = Color.Black
-                ),
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Black),
                 actions = {
-                    // Toggle Switch in top bar
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = if (isEnabled) "ON" else "OFF",
-                            color = if (isEnabled) Color.Green else Color.Gray,
+                            text = if (isMasterEnabled) "Master ON" else "Master OFF",
+                            color = if (isMasterEnabled) Color.Green else Color.Gray,
                             style = MaterialTheme.typography.labelMedium
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Switch(
-                            checked = isEnabled,
-                            onCheckedChange = toggleEnabled,
+                            checked = isMasterEnabled,
+                            onCheckedChange = toggleMaster,
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color.Green,
                                 checkedTrackColor = Color(0xFF4CAF50)
@@ -136,9 +144,12 @@ fun MainScreen() {
             )
         },
         floatingActionButton = {
-            if (isEnabled) {  // Only show + button when enabled
+            if (isMasterEnabled) {
                 FloatingActionButton(
-                    onClick = { showDialog = true },
+                    onClick = {
+                        editingReminder = null
+                        showDialog = true
+                    },
                     containerColor = Color(0xFFBB86FC)
                 ) {
                     Icon(Icons.Default.Add, contentDescription = "Add reminder", tint = Color.Black)
@@ -155,12 +166,9 @@ fun MainScreen() {
         ) {
             if (reminders.isEmpty()) {
                 item {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
-                            text = if (isEnabled) "No reminders yet.\nTap + to add one." else "Reminders are disabled.",
+                            "No reminders yet.\nTap + to add one.",
                             color = Color.Gray,
                             style = MaterialTheme.typography.bodyLarge
                         )
@@ -191,11 +199,27 @@ fun MainScreen() {
                                     color = Color(0xFFB0B0B0)
                                 )
                             }
+
+                            // Individual Toggle
+                            Switch(
+                                checked = reminder.isEnabled,
+                                onCheckedChange = { toggleReminder(reminder, it) },
+                                modifier = Modifier.padding(horizontal = 8.dp),
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color(0xFF4CAF50)
+                                )
+                            )
+
+                            // Edit Button
                             IconButton(onClick = {
-                                ReminderRepository.delete(reminder.id)
-                                AlarmScheduler.cancel(context, reminder.id)
-                                refresh()
+                                editingReminder = reminder
+                                showDialog = true
                             }) {
+                                Icon(Icons.Default.Edit, contentDescription = "Edit", tint = Color(0xFFBB86FC))
+                            }
+
+                            // Delete Button
+                            IconButton(onClick = { deleteReminder(reminder.id) }) {
                                 Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Red)
                             }
                         }
@@ -205,15 +229,21 @@ fun MainScreen() {
         }
     }
 
-    // Add Reminder Dialog
+    // Add / Edit Dialog
     if (showDialog) {
-        var text by remember { mutableStateOf("") }
-        val timePickerState = rememberTimePickerState()
+        var text by remember { mutableStateOf(editingReminder?.text ?: "") }
+        val timePickerState = rememberTimePickerState(
+            initialHour = editingReminder?.hour ?: 8,
+            initialMinute = editingReminder?.minute ?: 0
+        )
 
         AlertDialog(
-            onDismissRequest = { showDialog = false },
+            onDismissRequest = {
+                showDialog = false
+                editingReminder = null
+            },
             containerColor = Color(0xFF1C1C1C),
-            title = { Text("New Daily Reminder", color = Color.White) },
+            title = { Text(if (editingReminder == null) "New Daily Reminder" else "Edit Reminder", color = Color.White) },
             text = {
                 Column {
                     OutlinedTextField(
@@ -230,26 +260,49 @@ fun MainScreen() {
             confirmButton = {
                 TextButton(onClick = {
                     if (text.isNotBlank()) {
-                        val newId = (reminders.maxOfOrNull { it.id } ?: -1) + 1
-                        val reminder = Reminder(
-                            id = newId,
+                        val id = editingReminder?.id ?: ((reminders.maxOfOrNull { it.id } ?: -1) + 1)
+                        val newReminder = Reminder(
+                            id = id,
                             text = text,
                             hour = timePickerState.hour,
-                            minute = timePickerState.minute
+                            minute = timePickerState.minute,
+                            isEnabled = editingReminder?.isEnabled ?: true
                         )
-                        ReminderRepository.add(reminder)
-                        if (isEnabled) {
-                            AlarmScheduler.schedule(context, reminder)
+
+                        if (editingReminder == null) {
+                            // Add new
+                            ReminderRepository.add(newReminder)
+                            if (isMasterEnabled && newReminder.isEnabled) {
+                                AlarmScheduler.schedule(context, newReminder)
+                            }
+                        } else {
+                            // Update existing
+                            val currentList = ReminderRepository.getAll().toMutableList()
+                            val index = currentList.indexOfFirst { it.id == id }
+                            if (index != -1) {
+                                currentList[index] = newReminder
+                                ReminderRepository.saveAll(currentList)
+                            }
+                            // Re-schedule if needed
+                            AlarmScheduler.cancel(context, id)
+                            if (isMasterEnabled && newReminder.isEnabled) {
+                                AlarmScheduler.schedule(context, newReminder)
+                            }
                         }
+
                         refresh()
                         showDialog = false
+                        editingReminder = null
                     }
                 }) {
-                    Text("Add", color = Color(0xFFBB86FC))
+                    Text(if (editingReminder == null) "Add" else "Save", color = Color(0xFFBB86FC))
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showDialog = false }) {
+                TextButton(onClick = {
+                    showDialog = false
+                    editingReminder = null
+                }) {
                     Text("Cancel", color = Color.White)
                 }
             }
@@ -257,13 +310,15 @@ fun MainScreen() {
     }
 }
 
-// Helper functions for saving toggle state
-private fun getEnabledState(context: android.content.Context): Boolean {
+// ======================
+// Helper functions for master toggle
+// ======================
+private fun getMasterEnabledState(context: android.content.Context): Boolean {
     val prefs = context.getSharedPreferences("tts_prefs", android.content.Context.MODE_PRIVATE)
-    return prefs.getBoolean("enabled", true)
+    return prefs.getBoolean("master_enabled", true)
 }
 
-private fun saveEnabledState(context: android.content.Context, enabled: Boolean) {
+private fun saveMasterEnabledState(context: android.content.Context, enabled: Boolean) {
     val prefs = context.getSharedPreferences("tts_prefs", android.content.Context.MODE_PRIVATE)
-    prefs.edit().putBoolean("enabled", enabled).apply()
+    prefs.edit().putBoolean("master_enabled", enabled).apply()
 }
